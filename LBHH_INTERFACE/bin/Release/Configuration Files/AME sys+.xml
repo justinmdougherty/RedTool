@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Configure Waveform -->
+<HWIWaveformConfig>
+  <!-- not all HWIWaveformConfig lines required for every waveform -->
+  <!-- name is text that gets displayed in LBHH Red's Slot XML textbox -->
+  <!-- Waveform is string to come from BOLT that IDs the waveform -->
+  <!-- NeedsKey is string to come from BOLT when it needs to be keyed, otherwise can skip to next waveform -->
+  <!-- passwordPrompt is what to look for if a Debug Port password is required -->
+  <!-- password is waveform unique Debug Port password -->
+  <!-- BrickNumber is what to trigger on for getting brick # to display in GUI and add to TEKOffset -->
+  <!-- UnitID is TX ID put into the LBHH Red Unit ID textbox -->
+  <!-- prompt is BOLT waveform command line prompt -->
+  <!-- TEKLoad is waveform dependent command to load TEK key, %d present would mean there are multiple keys -->
+  <!-- TEKFile is file in which TEKs are stored in -->
+  <!-- TEKOffset is TEK file index offset from brick number -->
+  <!-- KeyingID field allows users to input Keying ID if it is not directly related to Brick Number and TEK Offset -->
+  <!-- KeyOrder only applicable if have TEKLoad with a %d, use listed #s to grap a key within the list of keys found under indexed device ID in TEK file -->
+  <!-- LightningWFChange boolean : 1 == change using BOLT User Port, i.e. not BOLT Debug port; 0 or not present use Debug Port -->
+  <name>AME sys +</name>
+  <Waveform>BOLT AME Application</Waveform>
+  <NeedsKey>Error: Invalid TEK</NeedsKey>
+  <passwordPrompt>Initializing:.</passwordPrompt>
+  <password>*GPSTimeOut</password>
+  <BrickNumber Prompt="BrickNumber" Trigger="NiosApp"/>
+  <UnitID Prompt="UnitID" Trigger="UnitID_A1"/><!-- Only one per device load if there are none user must determine id manually if there are multiple tool will throw error-->
+  <prompt>BOLT AME MONITOR></prompt>
+  <TEKLoad>LOADTEK</TEKLoad>
+  <TEKFile>AME.tek</TEKFile>
+  <!-- Commands to be sent after loading TEK Keys -->
+  <Commands>
+    <!-- some commands are BOLT system and some are waveform unique, save commands may be waveform unique -->
+    <!-- Type is the actual BOLT command -->
+    <!-- NumArguments is how many characters user needs to enter -->
+    <!-- ArgumentHelp is what gets displayed to LBHH Red user -->
+    <!-- ArgumentType is self explanatory, used by LBHH Red when parsing user input -->
+    <!-- <Command  Type="cmd_str " NumArguments="#charLen" ArgumentHelp="Prompt to User: " ArgumentType="int"/> -->
+    <Command  Type="SILENTFLAG TRUE" NumArguments="0"/>
+    <Command  Type="LLDEGMINSECFLAG TRUE" NumArguments="0"/>
+    <Command  Type="GPSANTENNA PASSIVE" NumArguments="0"/>
+    <Command  Type="GDBENFLAG FALSE" NumArguments="0"/>
+    <!-- save BOLT system parameters before starting waveform specific -->
+    <Command  Type="systemsavenv" NumArguments="0"/>
+    <Command  Type="AUTOSTOPTRANSMITFEATUREENABLE FALSE" NumArguments="0"/>
+    <!-- save AME waveform slot specific commands -->
+    <Command  Type="wfsavenv"  NumArguments="0"/>
+  </Commands>
+</HWIWaveformConfig>

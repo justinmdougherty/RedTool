@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Configure Waveform -->
+<HWIWaveformConfig>
+  <!-- not all HWIWaveformConfig lines required for every waveform -->
+  <!-- name is text that gets displayed in LBHH Red's Slot XML textbox -->
+  <!-- Waveform is string to come from BOLT that IDs the waveform -->
+  <!-- NeedsKey is string to come from BOLT when it needs to be keyed, otherwise can skip to next waveform -->
+  <!-- passwordPrompt is what to look for if a Debug Port password is required -->
+  <!-- password is waveform unique Debug Port password -->
+  <!-- BrickNumber is what to trigger on for getting brick # to display in GUI and add to TEKOffset -->
+  <!-- UnitID is TX ID put into the LBHH Red Unit ID textbox -->
+  <!-- prompt is BOLT waveform command line prompt -->
+  <!-- TEKLoad is waveform dependent command to load TEK key, %d present would mean there are multiple keys -->
+  <!-- TEKFile is file in which TEKs are stored in -->
+  <!-- TEKOffset is TEK file index offset from brick number -->
+  <!-- KeyingID field allows users to input Keying ID if it is not directly related to Brick Number and TEK Offset -->
+  <!-- KeyOrder only applicable if have TEKLoad with a %d, use listed #s to grap a key within the list of keys found under indexed device ID in TEK file -->
+  <!-- LightningWFChange boolean : 1 == change using BOLT User Port, i.e. not BOLT Debug port; 0 or not present use Debug Port -->
+  <name>PINE test</name>
+  <Waveform>BOLT PINE Application</Waveform>
+  <NeedsKey>Error: Invalid Battery Backed Up SRAM Data</NeedsKey>
+  <passwordPrompt>Initializing:.</passwordPrompt>
+  <password>*Fstop!</password>
+  <BrickNumber Prompt="BrickNumber" Trigger="NiosApp"/>
+  <prompt>BOLT PINE MONITOR></prompt>
+  <TEKLoad>LOADTEK</TEKLoad>
+  <TEKFile>AME.tek</TEKFile>
+  <LightningWFChange>1</LightningWFChange>
+  <!-- Commands to be sent after loading TEK Keys -->
+  <Commands>
+    <!-- some commands are BOLT system and some are waveform unique, save commands may be waveform unique -->
+    <!-- Type is the actual BOLT command -->
+    <!-- NumArguments is how many characters user needs to enter -->
+    <!-- ArgumentHelp is what gets displayed to LBHH Red user -->
+    <!-- ArgumentType is self explanatory, used by LBHH Red when parsing user input -->
+    <!-- <Command  Type="cmd_str " NumArguments="#charLen" ArgumentHelp="Prompt to User: " ArgumentType="int"/> -->
+    <!-- "defaultencryptedsram" is Shoreline unique and must be sent/saved first after TEK key loaded -->
+    <Command  Type="SILENTFLAG TRUE" NumArguments="0"/>
+    <Command  Type="LLDEGMINSECFLAG FALSE" NumArguments="0"/>
+    <Command  Type="GPSANTENNA PASSIVE" NumArguments="0"/>
+    <Command  Type="GDBENFLAG FALSE" NumArguments="0"/>
+    <!-- save BOLT system parameters before starting waveform specific -->
+    <Command  Type="systemsavenv" NumArguments="0"/>
+    <Command  Type="fsid " NumArguments="4" ArgumentHelp="FSID (Related to Case Number): " ArgumentType="int"/>
+    <!-- Command  Type="txstart 1" NumArguments="0"/ -->
+    <Command  Type="txstart " NumArguments="2" ArgumentHelp="TX Start Second: " ArgumentType="int"/>
+    <Command  Type="txfreq " NumArguments="10" ArgumentHelp="TX Freq Hz: " ArgumentType="int"/>
+    <Command  Type="fogkey 0 111111111111111111111111111111111111111111111111111111111111" NumArguments="4" ArgumentHelp="Enter test Fog Spreading Key 0 (XXXX): " ArgumentType="int"/>
+    <Command  Type="fogkey 1 222222222222222222222222222222222222222222222222222222222222" NumArguments="4" ArgumentHelp="Enter test Fog Privacy Key 1 (XXXX): " ArgumentType="int"/>
+    <!-- Shoreline save commands settings -->
+    <Command  Type="encsave"  NumArguments="0"/>
+  </Commands>
+</HWIWaveformConfig>

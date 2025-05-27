@@ -1,0 +1,182 @@
+This is the software for the Lightning BOLT Handheld (LBHH) "RED" production
+tool for keying & configuring BOLTs, keying & enabling LBHH infil, setting
+waveform loadout information in LBHH, enabling AT, etc.
+
+Project Owner(s): NSWCDD/H12/Pharos
+Author(s): Colin Ward, Rob Kirby
+IDE: Microsoft Visual Studio 2015
+
+
+FILES INCLUDED IN THE PROJECT TREE:
+--------------------------------------------------------------------------------
+ExcelKeys.cs - 
+GUICallbacks.cs - 
+Helpers.cs - 
+LbhhHwi.cs - 
+LoMsgThread.cs - 
+LtMsgThread.cs - 
+Program.cs - 
+MS VS generated files (with almost no reason to manually manipulate):
+  App.config
+  LbhhHwi.designer.cs
+  LbhhHwi.resx
+  LBHH_RED_INTERFACE.csproj
+  LBHH_RED_INTERFACE.csproj.user
+Graphics:
+  CheckMark.jpg
+  LBHHr.ico
+  minusImage.jpg
+  xmark.png
+
+
+REVISION HISTORY (reverse chronological order):
+--------------------------------------------------------------------------------
+yyyy/mm/dd  HH:mm:ss    Ver x.y    Rob Kirby    MS VS 2015
+  Executabe Size - ###,### bytes
+  # <change description>
+  Files Altered
+    ExcelKeys.cs                ()
+    GUICallbacks.cs             ()
+    Helpers.cs                  ()
+    LbhhHwi.cs                  ()
+    LbhhHwi.Designer.cs         ()
+    LoMsgThread.cs              ()
+    LtMsgThread.cs              ()
+    Program.cs                  ()
+
+TODO -
+  * Update version text in HelpAboutToolStripMenuItem_Click()
+  * Get rid of or completely stub out useless code (e.g. building but not
+    writing diag strings to diagRichTextBox)
+  * ??? When change wf via Ltng just immediately switch COMx to debug port and start
+    working w/new wf, i.e. no need to wait and cycle power before COMx switch ???
+    See how YELLOW tool does wf switching
+  * Ring bell EVERY time user action is required
+  * Make use of <NeedsKey> so that if not found one can skip keying the waveform
+    which would be particularly helpful to avoid execution failing with WF-C
+  * Fix program "Not Responding" when finish keying CH and switch to another wf
+  * Enforce call-response paradigm which got fubared at some point in WhiteFog
+    code changes (WF was used as starat for RED), e.g. fix LoRespStatus
+    Fake receiving ACK of request to change COMx (O.ECP #)
+  * Get rid of LbhhHwi.cs SendLightningCommands() which duplicates LtMsgThread
+    but without freeing Main thread to do GUI things.
+  * Update how diagRichTextBox is written and provide color definitions in Helpers.cs
+    immulate how Yellow Tool does colors
+
+2022/05/22  21:40:29    Ver 2.1.7    Rob Kirby    MS VS 2015
+  Executabe Size - 339,968 bytes
+  1 Add distribution statement to the menu item 'Help -> About'
+    Total re-write of 'Help -> User Guide' (was 'Help -> General')
+  2 Add and use red icon LBHHr.ico and delete more generic LBHH.ico
+  3 Delete stubbed out class WaveFormInfo
+  4 Improve feedback message(s) to user
+  5 Replace vestigal WhiteFog comments w/ ones applicable to Red Tool; re-order
+    xml file LocalName processing to align with std ordering within xml files
+  6 Refactor boltCfgBtn, LightningKey, LightningKeyChain, IDKey, and grpkeys
+    to keyAndCfgBoltBtn, InfilGroupKey, InfilKeyChain, uniqueKey, and infilKeys
+    (respectively) to more correctly reflect purpose and identity
+  7 Fix TabStop property for multiple GUI controls; resize some controls but
+    VisualStudion keep resizing 
+  8 Read infil key file the 1st time user click 'Connect' rather than make user
+    click a button on Keying tab
+  9 Add functionality of loading obfuscation keys lookup table by 
+    a) refactoring 'Read Infil Key File' button to 'Load Obfuscation Table',
+    b) adding C.OLT commands to new 'C_OLT' worksheet in KeyChain.xlsx, and
+    c) processing the new worksheet to include sending commands to Lightning
+ 10 Removed some useless or stubbed code, e.g. openBoltack, unused diag strings
+    Work on read-ability & plethora of misleading, non-sense, vestigal comments
+ 11 Re-label 'Active Infil/Exfil' to 'Activate Infil'
+    Re-label 'Communications' to 'Comms Log'
+    Move 'Activate Infil' tab to the right of 'Misc' tab, for natural flow of use
+    Delete vestigal 'Exfil Waveform' group box and control from 'Activate Infil'
+ 12 Improve runtime by reducing Thread.Sleep by 50% for most QueueLtMessage()
+ 13 using System.Media SystemSounds.Beep.Play() for user notifications
+    using Microsoft.VisualBasic for Interaction.InputBox
+ 14 Update message/instructions to user wrt AT-disable procedure
+ 15 Fix message time-outs for Ltng terminated commands
+ 16 Clear BoltDiag in SendXmlCommands at end of 'for' loop rather than midway
+    so we can speed up processing (old point of clearing deletes expected data)
+    and in CmdWaveformChange() and CheckResetTEK() clear it just before sending
+    BOLT Debug port command rather than after (again, do not delete response)
+ 17 Refactor SwitchWaveFormLightning() to MakeLightningSwitchWaveform(),
+    refactor WaitforLightningReset() to ConnectToLightning()
+    refactor ConfigureBoltCom() to ConnectToBoltDebugPort()
+    refactor GetUserID() to GetUnitID()
+ 18 Mod GetUnitID() to return immediately if unitIDprompt is ""
+ 19 Post timestamped "RCV: <str>" into diagRichTextBox at point when
+    message terminater received.
+    Post <msgToUser>" into diagRichTextBox once at end of ParseLoResponse
+    rather than each place it gets generated
+ 20 Post timestamped "CMD: <str>" into diagRichTextBox at point when command
+    written, which is more useful than old-way when built/queued; and as part of
+    that convert all Build_(msg) routines to return strings.
+ 21 Get rid of vesitgal WhiteFog auto-starting threads when others stopped
+ 22 Simplify handling of waveform password (or lack of password in XML) which
+    greatly simplies KeyAndCfgBoltBtn_Click() thus improving maintainability
+ 23 Fix SendXmlCommands() indexing when checking .cmdPrompt after a cmd sent,
+    now waveforms.hwiParams[waveforms.wfidx] instead of waveforms.hwiParams[0]
+ 24 Allow unique IDs up to 65535 (ID0001-ID9999, I10000-I65535) because Lynx IDs
+    range being expanded due to RJT hogging all the IDs - though not using them
+ 25 Delete functionally unused ProgParams attribute numNonKeys
+  # Updated version text
+  Files Removed
+    LBHH.ico                    (2)
+  Files Added
+    LBHHr.ico                   (2)
+  Files Altered
+    ExcelKeys.cs                (6,9bc,10)
+    GUICallbacks.cs             (1,4,6,8,9ac,10,11,12,13,17,21,22,24,25,#)
+    Helpers.cs                  (9a,13)
+    LbhhHwi.cs                  (3,5,6,8,9abc,10,11,13,16,17,18,21,22,23,24,25)
+    LbhhHwi.resx                (11,24)
+    LbhhHwi.Designer.cs         (1,6,7,9a,11,24)
+    LBHH_RED_INTERFACE.csproj   (2)
+    LoMsgThread.cs              (9c,10,14,19)
+    LtMsgThread.cs              (6,9c,15,20,24,25)
+
+
+2021/10/26  ‏‎09:18:54    Ver 2.1.6    Rob Kirby    MS VS 2015
+  Executeable Size - 334,336 bytes
+  1 Add BusyBar and use that instead of finicky "WaitCursor"
+  2 Mod how application title bar text is maintained (this.Text)
+  3 Update waveformtxtbox/WFMID more promptly to indicate progress/status
+  4 Update many messages to user (hopefully improved)
+  5 Stub out class WaveFormInfo (can just delete it now)
+  6 Improve handling of Waveform Info tab data display
+  7 Increase waveformConfigData to 62 families (from 16); still hardcoded
+  8 Improve inter-character timing when sendBoltCommandslowly (~20x faster)
+  9 Change text and position of some GUI features
+  Files Altered
+    GUICallbacks.cs             (1,2,3,4)
+    LbhhHwi.cs                  (1,2,5,6,7,8)
+    LbhhHwi.designer.cs         (1,2,7,9)
+
+2021/06/04  ‏‎09:18:54    Ver 2.1.5    Rob Kirby    MS VS 2015
+  Executeable Size - 334,848 bytes
+  1 Add support for more than 16 family types (use base62hex family char)
+  Files Altered
+    GUICallbacks.cs             (1)
+    LbhhHwi.cs                  (1)
+
+2021/02/02 11:45:30    Ver 2.1.0    Rob Kirby     MS VS 2015
+  Executabe Size -  333,824 bytes
+  1 Refactor Admin tab to Misc tab
+  2 Refactor Setup tab to Keying tab
+  3 Refactor Waveforms tab to WF Info tab
+  4 Refactor Keying tab's deviceIDbox to devInfilUniqueIdBox
+    and unitIdtxtbox to txIdTxtBox
+  5 Tweek GUI controls layout
+  6 Update AT info displayed to user
+  Files Altered
+    GUICallbacks.cs             (1)
+    Helpers.cs                  (2,3,4)
+    LbhhHwi.cs                  (3,4)
+    LbhhHwi.designer.cs         (3,4,5)
+    LbhhHwi.resx                (4)
+    LoMsgThread.cs              (6)
+
+
+2020/12/17 21:21:22   Rob Kirby                    MS VS 2015
+  Executabe Size -  333,312 bytes
+  This is the baseline version for the purposes of this file.  It is fairly
+  stable but could use some GUI improvements, timing optimization, etc.
