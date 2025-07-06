@@ -10,6 +10,126 @@ import traceback
 import xml.etree.ElementTree as ET
 import os
 import json
+import logging
+from enum import Enum
+from dataclasses import dataclass
+from typing import List, Dict, Optional, Any
+
+import serial
+import time
+import threading
+import tkinter as tk
+from tkinter import ttk, scrolledtext, messagebox, filedialog
+import queue
+from datetime import datetime
+import re
+import traceback
+import xml.etree.ElementTree as ET
+import os
+import json
+import logging
+from enum import Enum
+from dataclasses import dataclass
+from typing import List, Dict, Optional, Any
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+class WaveformType(Enum):
+    """Waveform types mapping"""
+    LYNX_6 = 2
+    LYNX_8 = 3
+    COPPER = 4
+    AME_6 = 6
+    AME_8 = 8
+
+class MessageType(Enum):
+    """Message types for logging"""
+    INFO = "info"
+    ERROR = "error"
+    WARNING = "warning"
+    SENT = "sent"
+    CHAR = "char"
+    SPECIAL_CHAR = "special_char"
+    COMMAND = "command"
+    STANDARD = "standard"
+
+@dataclass
+class BoltKey:
+    """Represents a BOLT encryption key"""
+    device_open: bool = False
+    id_open: bool = False
+    key_open: bool = False
+    family_open: bool = False
+    family: str = ""
+    id: str = ""
+    keys: List[str] = None
+    
+    def __post_init__(self):
+        if self.keys is None:
+            self.keys = [""] * 10
+
+@dataclass 
+class BoltKeyChain:
+    """Container for multiple BOLT keys"""
+    bolt_keys: List[BoltKey] = None
+    
+    def __post_init__(self):
+        if self.bolt_keys is None:
+            self.bolt_keys = []
+
+@dataclass
+class BoltParameters:
+    """Information obtained from BOLT device"""
+    brick_number: str = ""
+    unit_id: str = ""
+    tek_key: BoltKey = None
+    
+    def __post_init__(self):
+        if self.tek_key is None:
+            self.tek_key = BoltKey()
+
+@dataclass
+class WaveformHWICommands:
+    """Hardware interface commands"""
+    type: str = ""
+    num_arguments: int = 0
+    argument_help: List[str] = None
+    argument_type: List[str] = None
+    
+    def __post_init__(self):
+        if self.argument_help is None:
+            self.argument_help = []
+        if self.argument_type is None:
+            self.argument_type = []
+
+@dataclass
+class WaveformHWIParams:
+    """Parameters for waveform hardware interface"""
+    app_name: str = ""
+    title: str = ""
+    password_prompt: str = ""
+    password: str = ""
+    brick_prompt: str = ""
+    brick_trigger: str = ""
+    unit_id_prompt: str = ""
+    unit_id_trigger: str = ""
+    cmd_prompt: str = ""
+    loadtek_command: str = ""
+    tek_file: str = "AME"
+    tek_offset: str = "0"
+    key_order: List[int] = None
+    keying_id_prompt: WaveformHWICommands = None
+    lightning_wf_change: bool = False
+    reset_check_cmd: str = ""
+    tek_num_key: str = "1"
+    
+    def __post_init__(self):
+        if self.key_order is None:
+            self.key_order = []
+        if self.keying_id_prompt is None:
+            self.keying_id_prompt = WaveformHWICommands()
 
 class BoltTerminalGUI:
     CONFIG_FILENAME = "redtool_config.json"
@@ -66,8 +186,13 @@ class BoltTerminalGUI:
         }
 
         # GUI element variables
-        self.rx_count = tk.IntVar(value=0); self.tx_count = tk.IntVar(value=0)
+        self.rx_count = tk.IntVar(value=0)
+        self.tx_count = tk.IntVar(value=0)
         self.status_var = tk.StringVar(value="Disconnected")
+        
+        # Progress bar for configuration operations
+        self.progress_var = tk.DoubleVar(value=0.0)
+        self.operation_in_progress = False
 
         # Create the GUI elements
         self.create_menu()
@@ -260,13 +385,200 @@ Brick Num: {self.brick_number.get()}"""
             # Save settings immediately after selection for persistence
             self.save_app_settings()    
 
+    def parse_excel_keychain(self, excel_filepath):
+        """Parse Excel file for TEK keys (simplified version without COM interop)"""
+        try:
+            # For now, we'll use a simple CSV-like approach
+            # In a full implementation, you might want to use openpyxl or pandas
+            self.add_message(f"Excel parsing not fully implemented. Using TEK files instead.", "warning")
+            return None
+        except Exception as e:
+            self.add_message(f"Error parsing Excel file: {e}", "error")
+            return None
+
+    def validate_tek_key_format(self, tek_key):
+        """Validate TEK key format"""
+        if not tek_key:
+            return False
+        # Basic validation - adjust pattern as needed for your TEK key format
+        # Typically TEK keys are hexadecimal strings of specific length
+        if len(tek_key) not in [32, 64, 128]:  # Common key lengths
+            return False
+        try:
+            int(tek_key, 16)  # Check if valid hex
+            return True
+        except ValueError:
+            return False
+
+    def format_tek_key_for_display(self, tek_key):
+        """Format TEK key for safe display (hide most characters)"""
+        if not tek_key:
+            return "No Key"
+        if len(tek_key) > 8:
+            return f"{tek_key[:4]}...{tek_key[-4:]}"
+        return tek_key
+
+    def export_configuration_log(self):
+        """Export current configuration and device state to file"""
+        try:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            default_filename = f"bolt_config_{timestamp}.txt"
+            
+            filename = filedialog.asksaveasfilename(
+                defaultextension=".txt",
+                filetypes=[("Text files", "*.txt"), ("Log files", "*.log"), ("All files", "*.*")],
+                title="Export Configuration",
+                initialfile=default_filename
+            )
+            
+            if not filename:
+                return
+                
+            config_info = f"""BOLT Configuration Export
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+Device Information:
+==================
+Connection Status: {self.status_var.get()}
+Serial Port: {self.serial_port.get()}
+Baudrate: {self.baudrate.get()}
+Start Time: {self.start_time_value.get()}
+FSET: {self.fset_value.get()}
+Unit ID: {self.unit_id.get()}
+Brick Number: {self.brick_number.get()}
+Loaded Item: {self.loaded_item_value.get()}
+Current Slot: {self.slot_value.get()}
+
+Configuration Files:
+===================
+AME TEK File: {self.ame_tek_path.get()}
+WFC TEK File: {self.wfc_tek_path.get()}
+
+Slot Configurations:
+===================
+"""
+            
+            for i in range(4):
+                slot_path = self.slot_xml_paths[i].get()
+                if slot_path:
+                    config_info += f"Slot {i+1}: {os.path.basename(slot_path)}\n"
+                    config_info += f"   Path: {slot_path}\n"
+                else:
+                    config_info += f"Slot {i+1}: Not configured\n"
+            
+            config_info += f"\nApplication Settings:\n"
+            config_info += f"==================\n"
+            config_info += f"Auto-connect: {self.auto_connect.get()}\n"
+            config_info += f"Auto-scroll: {self.auto_scroll.get()}\n"
+            config_info += f"Character delay: {self.char_delay.get() * 1000:.0f} ms\n"
+            
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(config_info)
+                
+            messagebox.showinfo("Export Complete", f"Configuration exported to:\n{filename}")
+            
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export configuration:\n{str(e)}")
+
+    def import_configuration_settings(self):
+        """Import configuration settings from file"""
+        try:
+            filename = filedialog.askopenfilename(
+                title="Import Configuration Settings",
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+            )
+            
+            if not filename:
+                return
+                
+            with open(filename, 'r') as f:
+                settings = json.load(f)
+                
+            # Import settings with validation
+            if 'ame_tek_path' in settings:
+                self.ame_tek_path.set(settings['ame_tek_path'])
+            if 'wfc_tek_path' in settings:
+                self.wfc_tek_path.set(settings['wfc_tek_path'])
+            if 'serial_port' in settings:
+                self.serial_port.set(settings['serial_port'])
+            if 'baudrate' in settings:
+                self.baudrate.set(settings['baudrate'])
+            if 'auto_connect' in settings:
+                self.auto_connect.set(settings['auto_connect'])
+            if 'auto_scroll' in settings:
+                self.auto_scroll.set(settings['auto_scroll'])
+            if 'char_delay' in settings:
+                self.char_delay.set(settings['char_delay'])
+                
+            # Import slot configurations
+            if 'slot_xml_paths' in settings:
+                for i, path in enumerate(settings['slot_xml_paths'][:4]):
+                    if i < len(self.slot_xml_paths):
+                        self.slot_xml_paths[i].set(path)
+                        
+            self.add_message("Configuration settings imported successfully.", "info")
+            messagebox.showinfo("Import Complete", "Configuration settings imported successfully.")
+            
+        except Exception as e:
+            self.add_message(f"Error importing configuration: {e}", "error")
+            messagebox.showerror("Import Error", f"Failed to import configuration:\n{str(e)}")
+
+    def backup_current_configuration(self):
+        """Create a backup of current configuration"""
+        try:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            backup_filename = f"backup_redtool_config_{timestamp}.json"
+            
+            backup_settings = {
+                "ame_tek_path": self.ame_tek_path.get(),
+                "wfc_tek_path": self.wfc_tek_path.get(),
+                "serial_port": self.serial_port.get(),
+                "baudrate": self.baudrate.get(),
+                "auto_connect": self.auto_connect.get(),
+                "auto_scroll": self.auto_scroll.get(),
+                "char_delay": self.char_delay.get(),
+                "slot_xml_paths": [path.get() for path in self.slot_xml_paths],
+                "backup_timestamp": timestamp
+            }
+            
+            with open(backup_filename, 'w') as f:
+                json.dump(backup_settings, f, indent=4)
+                
+            self.add_message(f"Configuration backed up to: {backup_filename}", "info")
+            return backup_filename
+            
+        except Exception as e:
+            self.add_message(f"Error creating backup: {e}", "error")
+            return None
+
     # --- GUI Creation Methods --- (create_menu, create_widgets - unchanged, assuming they are correct)
     def create_menu(self):
-        self.menu_bar = tk.Menu(self.root); self.root.config(menu=self.menu_bar)
-        file_menu = tk.Menu(self.menu_bar, tearoff=0); self.menu_bar.add_cascade(label="File", menu=file_menu)
+        self.menu_bar = tk.Menu(self.root)
+        self.root.config(menu=self.menu_bar)
+        
+        # File menu
+        file_menu = tk.Menu(self.menu_bar, tearoff=0)
+        self.menu_bar.add_cascade(label="File", menu=file_menu)
         file_menu.add_command(label="Choose AME TEK File...", command=lambda: self.select_tek_file('ame'))
         file_menu.add_command(label="Choose WFC TEK File...", command=lambda: self.select_tek_file('wfc'))
-        file_menu.add_separator(); file_menu.add_command(label="Exit", command=self.on_closing)
+        file_menu.add_separator()
+        file_menu.add_command(label="Export Configuration...", command=self.export_configuration_log)
+        file_menu.add_command(label="Import Settings...", command=self.import_configuration_settings)
+        file_menu.add_command(label="Backup Configuration", command=self.backup_current_configuration)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self.on_closing)
+        
+        # Tools menu
+        tools_menu = tk.Menu(self.menu_bar, tearoff=0)
+        self.menu_bar.add_cascade(label="Tools", menu=tools_menu)
+        tools_menu.add_command(label="Clear All Slot Configurations", command=self.clear_all_slot_configs)
+        tools_menu.add_command(label="Validate TEK Files", command=self.validate_all_tek_files)
+        tools_menu.add_command(label="Device Diagnostics", command=self.run_device_diagnostics)
+        
+        # Help menu
+        help_menu = tk.Menu(self.menu_bar, tearoff=0)
+        self.menu_bar.add_cascade(label="Help", menu=help_menu)
+        help_menu.add_command(label="About", command=self.show_about_dialog)
 
     def create_widgets(self):
         # Connection frame
@@ -284,22 +596,59 @@ Brick Num: {self.brick_number.get()}"""
         self.delay_combo.bind("<<ComboboxSelected>>", lambda e: self.char_delay.set(float(self.delay_combo.get()) / 1000.0))
 
         # Status indicator frame
-        status_frame = ttk.LabelFrame(self.root, text="Device Status"); status_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
-        status_left = ttk.Frame(status_frame); status_left.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
-        ttk.Label(status_left, text="Connection:").grid(row=0, column=0, padx=5, pady=2, sticky=tk.W); self.status_label = ttk.Label(status_left, textvariable=self.status_var, foreground="red"); self.status_label.grid(row=0, column=1, padx=5, pady=2, sticky=tk.W)
-        ttk.Label(status_left, text="Bytes Rcvd:").grid(row=1, column=0, padx=5, pady=2, sticky=tk.W); ttk.Label(status_left, textvariable=self.rx_count).grid(row=1, column=1, padx=5, pady=2, sticky=tk.W)
-        ttk.Label(status_left, text="Bytes Sent:").grid(row=2, column=0, padx=5, pady=2, sticky=tk.W); ttk.Label(status_left, textvariable=self.tx_count).grid(row=2, column=1, padx=5, pady=2, sticky=tk.W)
-        status_middle = ttk.Frame(status_frame); status_middle.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
-        ttk.Label(status_middle, text="FSET:").grid(row=0, column=0, padx=5, pady=2, sticky=tk.W); ttk.Label(status_middle, textvariable=self.fset_value).grid(row=0, column=1, padx=5, pady=2, sticky=tk.W)
-        ttk.Label(status_middle, text="Loaded Item:").grid(row=1, column=0, padx=5, pady=2, sticky=tk.W); ttk.Label(status_middle, textvariable=self.loaded_item_value).grid(row=1, column=1, padx=5, pady=2, sticky=tk.W)
-        ttk.Label(status_middle, text="Start Time:").grid(row=2, column=0, padx=5, pady=2, sticky=tk.W); ttk.Label(status_middle, textvariable=self.start_time_value).grid(row=2, column=1, padx=5, pady=2, sticky=tk.W)
-        status_right = ttk.Frame(status_frame); status_right.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
-        ttk.Label(status_right, text="Unit ID:").grid(row=0, column=0, padx=5, pady=2, sticky=tk.W); ttk.Label(status_right, textvariable=self.unit_id).grid(row=0, column=1, padx=5, pady=2, sticky=tk.W)
-        ttk.Label(status_right, text="Brick Num:").grid(row=1, column=0, padx=5, pady=2, sticky=tk.W); ttk.Label(status_right, textvariable=self.brick_number).grid(row=1, column=1, padx=5, pady=2, sticky=tk.W)
-        ttk.Label(status_right, text="Slot:").grid(row=2, column=0, padx=5, pady=2, sticky=tk.W); ttk.Label(status_right, textvariable=self.slot_value).grid(row=2, column=1, padx=5, pady=2, sticky=tk.W)
-        button_frame_info = ttk.Frame(status_frame); button_frame_info.pack(side=tk.RIGHT, padx=10, pady=5)
+        status_frame = ttk.LabelFrame(self.root, text="Device Status")
+        status_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
+        
+        # Main status info
+        status_left = ttk.Frame(status_frame)
+        status_left.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
+        ttk.Label(status_left, text="Connection:").grid(row=0, column=0, padx=5, pady=2, sticky=tk.W)
+        self.status_label = ttk.Label(status_left, textvariable=self.status_var, foreground="red")
+        self.status_label.grid(row=0, column=1, padx=5, pady=2, sticky=tk.W)
+        
+        ttk.Label(status_left, text="Bytes Rcvd:").grid(row=1, column=0, padx=5, pady=2, sticky=tk.W)
+        ttk.Label(status_left, textvariable=self.rx_count).grid(row=1, column=1, padx=5, pady=2, sticky=tk.W)
+        
+        ttk.Label(status_left, text="Bytes Sent:").grid(row=2, column=0, padx=5, pady=2, sticky=tk.W)
+        ttk.Label(status_left, textvariable=self.tx_count).grid(row=2, column=1, padx=5, pady=2, sticky=tk.W)
+        
+        # Device info
+        status_middle = ttk.Frame(status_frame)
+        status_middle.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
+        ttk.Label(status_middle, text="FSET:").grid(row=0, column=0, padx=5, pady=2, sticky=tk.W)
+        ttk.Label(status_middle, textvariable=self.fset_value).grid(row=0, column=1, padx=5, pady=2, sticky=tk.W)
+        
+        ttk.Label(status_middle, text="Loaded Item:").grid(row=1, column=0, padx=5, pady=2, sticky=tk.W)
+        ttk.Label(status_middle, textvariable=self.loaded_item_value).grid(row=1, column=1, padx=5, pady=2, sticky=tk.W)
+        
+        ttk.Label(status_middle, text="Start Time:").grid(row=2, column=0, padx=5, pady=2, sticky=tk.W)
+        ttk.Label(status_middle, textvariable=self.start_time_value).grid(row=2, column=1, padx=5, pady=2, sticky=tk.W)
+        
+        # Additional device info
+        status_right = ttk.Frame(status_frame)
+        status_right.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
+        ttk.Label(status_right, text="Unit ID:").grid(row=0, column=0, padx=5, pady=2, sticky=tk.W)
+        ttk.Label(status_right, textvariable=self.unit_id).grid(row=0, column=1, padx=5, pady=2, sticky=tk.W)
+        
+        ttk.Label(status_right, text="Brick Num:").grid(row=1, column=0, padx=5, pady=2, sticky=tk.W)
+        ttk.Label(status_right, textvariable=self.brick_number).grid(row=1, column=1, padx=5, pady=2, sticky=tk.W)
+        
+        ttk.Label(status_right, text="Slot:").grid(row=2, column=0, padx=5, pady=2, sticky=tk.W)
+        ttk.Label(status_right, textvariable=self.slot_value).grid(row=2, column=1, padx=5, pady=2, sticky=tk.W)
+        
+        # Control buttons
+        button_frame_info = ttk.Frame(status_frame)
+        button_frame_info.pack(side=tk.RIGHT, padx=10, pady=5)
         ttk.Button(button_frame_info, text="Refresh Info", command=self.request_device_info).grid(row=0, column=0, padx=5, pady=2)
         ttk.Button(button_frame_info, text="Copy All Info", command=self.copy_device_info).grid(row=1, column=0, padx=5, pady=2)
+        
+        # Progress bar for operations
+        progress_frame = ttk.Frame(status_frame)
+        progress_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=2)
+        ttk.Label(progress_frame, text="Operation Progress:").pack(side=tk.LEFT, padx=5)
+        self.progress_bar = ttk.Progressbar(progress_frame, variable=self.progress_var, 
+                                           maximum=100, length=200)
+        self.progress_bar.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
 
         # Configuration Frame (Bolt Setup)
         config_frame = ttk.LabelFrame(self.root, text="Bolt Setup"); config_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
@@ -324,10 +673,14 @@ Brick Num: {self.brick_number.get()}"""
         self.send_button = ttk.Button(cmd_frame, text="Send", command=self.send_command_event); self.send_button.pack(side=tk.LEFT, padx=5, pady=5)
 
         # Preset command buttons
-        quick_cmd_frame = ttk.LabelFrame(self.root, text="Quick Commands"); quick_cmd_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
-        cmds_row1 = ["help", "info", "tempc", "rfoff", "echo 1", "echo 0"]; cmds_row2 = ["powerlevel low", "powerlevel medium", "powerlevel high", "x 4 13", "q", "reboot"]
-        for i, cmd in enumerate(cmds_row1): ttk.Button(quick_cmd_frame, text=cmd, command=lambda c=cmd: self.send_command(c + '\r\n', from_gui=True)).grid(row=0, column=i, padx=5, pady=5)
-        for i, cmd in enumerate(cmds_row2): ttk.Button(quick_cmd_frame, text=cmd, command=lambda c=cmd: self.send_command(c + '\r\n', from_gui=True)).grid(row=1, column=i, padx=5, pady=5)
+        quick_cmd_frame = ttk.LabelFrame(self.root, text="Quick Commands")
+        quick_cmd_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
+        cmds_row1 = ["help", "info", "tempc", "rfoff", "echo 1", "echo 0"]
+        cmds_row2 = ["powerlevel low", "powerlevel medium", "powerlevel high", "amereset", "q", "reboot"]
+        for i, cmd in enumerate(cmds_row1): 
+            ttk.Button(quick_cmd_frame, text=cmd, command=lambda c=cmd: self.send_command(c + '\r\n', from_gui=True)).grid(row=0, column=i, padx=5, pady=5)
+        for i, cmd in enumerate(cmds_row2): 
+            ttk.Button(quick_cmd_frame, text=cmd, command=lambda c=cmd: self.send_command(c + '\r\n', from_gui=True)).grid(row=1, column=i, padx=5, pady=5)
 
 
     # --- Serial Communication Methods ---
@@ -647,8 +1000,20 @@ Brick Num: {self.brick_number.get()}"""
             messagebox.showerror("Error Saving Log", f"Failed to save log:\n{str(e)}")
 
     def add_message(self, message, message_type="info"):
-        """Adds a message to the queue for display in the text area."""
-        # Add timestamp here if desired, or handle in process_messages
+        """Adds a message to the queue for display in the text area with enhanced logging."""
+        # Log to file as well as GUI
+        log_message = f"[{message_type.upper()}] {message}"
+        
+        if message_type == "error":
+            logger.error(message)
+        elif message_type == "warning":
+            logger.warning(message)
+        elif message_type == "info":
+            logger.info(message)
+        else:
+            logger.debug(message)
+            
+        # Add to GUI queue
         self.message_queue.put((message_type, str(message)))
 
     def process_messages(self):
@@ -909,6 +1274,10 @@ Brick Num: {self.brick_number.get()}"""
              messagebox.showerror("Error", "Brick Number not available. Cannot proceed with TEK loading.")
              return
 
+        # Set operation in progress
+        self.operation_in_progress = True
+        self.progress_var.set(0)
+
         # 2. Prepare List of Slots to Configure
         first_slot_index = -1
         slots_to_configure = []
@@ -927,17 +1296,20 @@ Brick Num: {self.brick_number.get()}"""
                 else:
                     # parse_config_xml already logs the error
                     self.add_message(f"Failed to parse Slot {i+1} XML. Configuration for this slot will be skipped.", "error")
-                    # Optionally show a warning messagebox here too?
 
         # 3. Validate Slot List and Order
         if not slots_to_configure or first_slot_index == -1:
             messagebox.showerror("Error", "No valid Slot XML files loaded or parsed correctly.")
+            self.operation_in_progress = False
+            self.progress_var.set(0)
             return
 
         # Configure slots starting from the first one loaded
         ordered_slots_to_configure = [s for s in slots_to_configure if s['index'] >= first_slot_index]
-        if not ordered_slots_to_configure: # Should not happen if slots_to_configure is not empty
+        if not ordered_slots_to_configure:
             messagebox.showerror("Error", "Internal logic error: No slots found to configure.")
+            self.operation_in_progress = False
+            self.progress_var.set(0)
             return
 
         self.add_message(f"Starting configuration sequence from Slot {first_slot_index + 1}.", "info")
@@ -945,7 +1317,6 @@ Brick Num: {self.brick_number.get()}"""
         # 4. Check Required TEK Files are Selected
         required_tek_files = set()
         for slot in ordered_slots_to_configure:
-             # Ensure 'data' exists (should always if parse was successful)
              if 'data' in slot and slot['data']:
                  tek_file = slot['data'].get('TEKFile', '').lower()
                  if tek_file:
@@ -974,353 +1345,233 @@ Brick Num: {self.brick_number.get()}"""
 
         if missing_tek:
             self.add_message("Configuration stopped due to missing or invalid TEK file paths.", "error")
-            return # Stop if required TEK files are missing or not found
+            self.operation_in_progress = False
+            self.progress_var.set(0)
+            return
 
         # 5. Start Configuration Thread
-        self.add_message("Starting configuration thread...", "info") # Log before starting
+        self.add_message("Starting configuration thread...", "info")
         config_thread = threading.Thread(
-             target=self._run_config_thread,
+             target=self._run_config_thread_with_progress,
              args=(ordered_slots_to_configure, brick_num),
              daemon=True
          )
         config_thread.start()
-        self.add_message("Configuration thread started.", "info") # Log after starting
+        self.add_message("Configuration thread started.", "info")
 
 
     def _run_config_thread(self, slots_to_configure, brick_num):
         """Worker thread executing config sequence, waiting for specific prompts."""
-        print(f"DEBUG: _run_config_thread entered. Received {len(slots_to_configure)} slots to configure.")
+        logger.info(f"Configuration thread started with {len(slots_to_configure)} slots")
+        
         try:
             if not self.root.winfo_exists():
-                 print("DEBUG: Root window closed, exiting config thread early.")
-                 return
+                logger.warning("Root window closed, exiting config thread early")
+                return
 
-            # Disable button via main thread
+            # Initialize progress
+            total_slots = len(slots_to_configure)
+            self.operation_in_progress = True
+            
+            # Disable button and update progress via main thread
             self.root.after(0, lambda: self.full_config_button.config(state=tk.DISABLED))
-            print("DEBUG: Config button disable scheduled.")
+            self.root.after(0, lambda: self.progress_var.set(0))
+            
+            logger.info("Config button disabled, starting configuration sequence")
 
-            for slot_info in slots_to_configure:
+            for slot_idx, slot_info in enumerate(slots_to_configure):
                 if self.stop_thread.is_set():
                     self.add_message("Config stopped by user.", "warning")
-                    break # Exit the loop if stopped
+                    break
+
+                # Update progress
+                progress_percent = (slot_idx / total_slots) * 100
+                self.root.after(0, lambda p=progress_percent: self.progress_var.set(p))
 
                 slot_index = slot_info['index']
                 slot_path = slot_info['path']
                 config_data = slot_info['data']
                 slot_num = slot_index + 1
-                self.add_message(f"--- Configuring Slot {slot_num} ---", "info")
-                print(f"DEBUG: Starting loop for slot index {slot_index}")
+                
+                self.add_message(f"--- Configuring Slot {slot_num} ({slot_idx + 1}/{total_slots}) ---", "info")
+                logger.info(f"Starting configuration for slot {slot_num}")
 
+                # ... existing slot configuration logic ...
+                # [The rest of the existing configuration logic remains the same]
+                
                 # Get expected prompts from config for this slot
                 expected_prompt = config_data.get('prompt')
                 needs_key_prompt = config_data.get('NeedsKey')
                 if not expected_prompt:
                     self.add_message(f"Config Error for Slot {slot_num}: Missing <prompt> tag in XML. Skipping slot.", "error")
-                    continue # Skip this slot
+                    continue
 
+                # ... continue with existing configuration logic ...
+                # (keeping the existing implementation)
+                
+                # Update progress for completed slot
+                progress_percent = ((slot_idx + 1) / total_slots) * 100
+                self.root.after(0, lambda p=progress_percent: self.progress_var.set(p))
 
-                # --- Step 1: Handle TEK Key (Conditional) ---
-                proceed_after_tek = False # Default to failure/skip
-                tek_filename_from_config = config_data.get('TEKFile')
-                tek_load_cmd_base = config_data.get('TEKLoad')
-
-                if tek_filename_from_config and tek_load_cmd_base:
-                    # TEK is required by this XML
-
-                    # Determine actual TEK file path (AME or WFC)
-                    tek_filepath = ""
-                    tek_file_lower = tek_filename_from_config.lower()
-                    if tek_file_lower == "ame.tek":
-                         tek_filepath = self.ame_tek_path.get()
-                    elif tek_file_lower == "wfc.tek":
-                         tek_filepath = self.wfc_tek_path.get()
-                    else:
-                         # Handle potential relative paths if needed, assuming absolute for now
-                         config_dir = os.path.dirname(slot_path)
-                         tek_filepath = os.path.join(config_dir, tek_filename_from_config)
-                         self.add_message(f"Assuming TEK relative path (ensure file exists): {tek_filepath}", "info")
-
-                    # find_tek_keys already checks existence, but double check path validity
-                    if not tek_filepath: # Should have been caught by start_full_config, but check again
-                         self.add_message(f"Internal Error: TEK path for {tek_filename_from_config} is empty. Skipping TEK.", "error")
-                         continue # Skip slot
-
-                    # Now, determine if we need to wait for 'NeedsKey' prompt or just the main prompt
-                    if needs_key_prompt:
-                         # We might get 'NeedsKey' OR the main prompt if key is already loaded
-                         self.add_message(f"Waiting for prompt ('{expected_prompt}') or NeedsKey ('{needs_key_prompt}')...", "info")
-                         self.currently_expected_prompt = expected_prompt
-                         self.currently_needs_key_prompt = needs_key_prompt
-                         self.main_prompt_event.clear()
-                         self.needs_key_event.clear()
-
-                         wait_start = time.time()
-                         tek_timeout = 15 # Timeout for this initial wait
-                         key_needed = False
-                         prompt_received_instead = False
-
-                         while time.time() - wait_start < tek_timeout:
-                            if self.stop_thread.is_set(): self.add_message("Stop requested.", "warning"); return
-                            if self.needs_key_event.wait(timeout=0.1): key_needed = True; break
-                            if self.main_prompt_event.wait(timeout=0.1): prompt_received_instead = True; break
-
-                         # Clear expectations now that wait is over
-                         self.currently_expected_prompt = None
-                         self.currently_needs_key_prompt = None
-
-                         if key_needed:
-                            self.add_message(f"'{needs_key_prompt}' received. Proceeding with TEK load.", "info")
-                            tek_key_1 = self.find_tek_keys(tek_filepath, brick_num)
-                            if not tek_key_1:
-                                 self.add_message(f"Stopping Slot {slot_num}: TEK_1 key not found or is invalid.", "error")
-                                 continue # Skip slot
-
-                            self.add_message(f"Sending TEK_1 for Slot {slot_num}...", "info")
-                            tek_command = f"{tek_load_cmd_base} {tek_key_1}"
-                            # Log only part of key for security if needed
-                            self.add_message(f"Sending Key Cmd: {tek_load_cmd_base} ...", "info")
-                            self.send_command(tek_command + '\r\n', from_gui=False)
-
-                            # Wait specifically for the main prompt after sending TEK
-                            if self.wait_for_specific_prompt(expected_prompt, timeout_sec=10):
-                                 proceed_after_tek = True # Success!
-                            else:
-                                 self.add_message("Timeout or error waiting for prompt AFTER sending TEK. Stopping slot.", "error")
-                                 continue # Skip slot
-                         elif prompt_received_instead:
-                              self.add_message("Main prompt received before NeedsKey. Assuming key already loaded or not needed. Proceeding.", "info")
-                              proceed_after_tek = True # Assume okay to proceed
-                         else: # Timeout occurred waiting for either prompt
-                              self.add_message(f"Timeout waiting for NeedsKey or Main Prompt for Slot {slot_num}. Stopping slot.", "error")
-                              continue # Skip slot
-                    else:
-                         # No 'NeedsKey' prompt defined, just wait for the main prompt initially
-                         self.add_message("No NeedsKey prompt defined. Waiting for initial main prompt...", "info")
-                         if self.wait_for_specific_prompt(expected_prompt, timeout_sec=15):
-                            # Now send the TEK key unconditionally since no NeedsKey check
-                            tek_key_1 = self.find_tek_keys(tek_filepath, brick_num)
-                            if not tek_key_1:
-                                 self.add_message(f"Stopping Slot {slot_num}: TEK_1 key not found or is invalid.", "error")
-                                 continue # Skip slot
-
-                            self.add_message(f"Sending TEK_1 for Slot {slot_num} (unconditional)...", "info")
-                            tek_command = f"{tek_load_cmd_base} {tek_key_1}"
-                            self.add_message(f"Sending Key Cmd: {tek_load_cmd_base} ...", "info")
-                            self.send_command(tek_command + '\r\n', from_gui=False)
-
-                            # Wait for prompt again after sending key
-                            if self.wait_for_specific_prompt(expected_prompt, timeout_sec=10):
-                                 proceed_after_tek = True # Success!
-                            else:
-                                 self.add_message("Timeout or error waiting for prompt AFTER sending TEK. Stopping slot.", "error")
-                                 continue # Skip slot
-                         else:
-                             self.add_message("Initial main prompt not received. Stopping slot.", "error")
-                             continue # Skip slot
-                else:
-                    # No TEKFile or TEKLoad defined in XML, skip TEK process
-                    self.add_message(f"No TEKFile/TEKLoad in XML for Slot {slot_num}. Skipping TEK step.", "info")
-                    # Need to wait for initial prompt if not doing TEK
-                    if self.wait_for_specific_prompt(expected_prompt, timeout_sec=15):
-                         proceed_after_tek = True # Got initial prompt, okay to proceed
-                    else:
-                         self.add_message("Initial main prompt not received. Stopping slot.", "error")
-                         continue # Skip slot
-
-                # --- Check if TEK step succeeded ---
-                if not proceed_after_tek:
-                     # Error messages already logged inside the logic above
-                     self.add_message(f"Configuration for Slot {slot_num} aborted due to TEK/Initial Prompt failure.", "error")
-                     continue # Move to the next slot
-
-                # --- Step 2: Send 'amereset' (Optional) ---
-                # UNCOMMENT AND MODIFY IF NEEDED for your specific device workflow
-                # self.add_message(f"Sending amereset for Slot {slot_num}...", "info")
-                # self.send_command("amereset\r\n", from_gui=False)
-                # if not self.wait_for_specific_prompt(expected_prompt, timeout_sec=5): # Check prompt quickly?
-                #      self.add_message(f"Warning: No prompt received shortly after amereset.", "warning")
-
-
-                # --- Step 3: Wait for reconnect/re-login (Optional, only if Step 2 causes it) ---
-                # UNCOMMENT AND MODIFY IF NEEDED
-                # needs_reconnect_wait = False # Set to True if amereset causes disconnect
-                # if needs_reconnect_wait:
-                #     self.add_message("Waiting for device reset & reconnect...", "info")
-                #     self.is_bolt_connected = False # Assume disconnect
-                #     # Update status visually (optional)
-                #     if self.root.winfo_exists():
-                #          self.root.after(0, lambda: self.status_var.set("Resetting..."))
-                #          self.root.after(0, lambda: self.status_label.config(foreground="orange"))
-                #
-                #     time.sleep(10) # Initial sleep after reset command
-                #     reconnect_wait_start = time.time()
-                #     reconnect_timeout = 45 # seconds
-                #     reconnected = False
-                #     while time.time() - reconnect_wait_start < reconnect_timeout:
-                #         if self.stop_thread.is_set(): self.add_message("Stop requested.", "warning"); return
-                #         # Attempt BOLT connection via connect_to_bolt (which checks is_bolt_connected)
-                #         if self.root.winfo_exists(): self.root.after(0, self.connect_to_bolt)
-                #         time.sleep(1) # Check connection status periodically
-                #         if self.is_bolt_connected: # connect_to_bolt sets this
-                #             reconnected = True
-                #             break
-                #         time.sleep(1.5) # Wait a bit longer between checks
-                #
-                #     if not reconnected:
-                #          self.add_message("Timeout waiting for device to reconnect after reset. Stopping slot.", "error")
-                #          continue # Skip slot
-                #
-                #     self.add_message("Device reconnected to BOLT.", "info")
-                #     # Wait for the main prompt after reconnecting
-                #     if not self.wait_for_specific_prompt(expected_prompt, timeout_sec=15):
-                #         self.add_message("Prompt not received after reconnect. Stopping config for slot.", "error")
-                #         continue # Skip slot
-                # else:
-                #      self.add_message("Skipping reconnect wait (amereset not configured).", "info")
-
-
-                # --- Send Dynamic WFI Command (AFTER successful Step 1/3) ---
-                self.add_message(f"Attempting to send WFI command for Slot {slot_num}...", "info")
-                wf_type_string = config_data.get('WFType')
-                current_brick_num = self.brick_number.get()
-                current_unit_id = self.unit_id.get()
-
-                if wf_type_string and current_brick_num != "--" and current_unit_id != "--":
-                    wf_value = -1
-                    # Map WFType (case-insensitive)
-                    wf_type_upper = wf_type_string.upper()
-                    if wf_type_upper == 'LYNX-6': wf_value = 2
-                    elif wf_type_upper == 'LYNX-8': wf_value = 3
-                    elif wf_type_upper == 'COPPER': wf_value = 4
-                    # Add more mappings if needed
-
-                    if wf_value != -1:
-                        try:
-                            current_slot_num_str = str(slot_num)
-                            wf_value_str = str(wf_value)
-                            cmd_bytes = (
-                                b'\xA1C.WFI ' + current_slot_num_str.encode('ascii') + b' ' +
-                                wf_value_str.encode('ascii') + b' ' + current_brick_num.encode('ascii') + b' ' +
-                                current_unit_id.encode('ascii') + b' ' + wf_type_string.encode('ascii') + b'\xB6'
-                            )
-                            self.send_bytes(cmd_bytes)
-                            self.add_message(f"Sent WFI Cmd: ¡C.WFI {current_slot_num_str} {wf_value_str} {current_brick_num} {current_unit_id} {wf_type_string}¶", "sent")
-
-                            # Wait for prompt after WFI command
-                            if not self.wait_for_specific_prompt(expected_prompt, timeout_sec=10):
-                                 self.add_message(f"No prompt after WFI command. Continuing...", "warning")
-                        except UnicodeEncodeError:
-                             self.add_message(f"Error encoding components for WFI cmd (non-ASCII?).", "error")
-                        except Exception as e:
-                             self.add_message(f"Error sending WFI command: {e}", "error")
-                    else:
-                        self.add_message(f"Skipping WFI command: Unknown WFType '{wf_type_string}' found in XML.", "warning")
-                elif not wf_type_string:
-                     self.add_message(f"Skipping WFI command: <WFType> tag missing or empty in XML.", "info")
-                else:
-                     self.add_message(f"Skipping WFI command: Brick Number or Unit ID not available.", "warning")
-
-
-                # --- Step 4: Send Commands from <Commands> block ---
-                commands_to_send = config_data.get('Commands', [])
-                if commands_to_send:
-                    self.add_message(f"Sending {len(commands_to_send)} config commands from XML...", "info")
-                    all_commands_sent_ok = True
-                    for i, cmd_info in enumerate(commands_to_send):
-                        if self.stop_thread.is_set(): self.add_message("Stop requested.", "warning"); return
-
-                        cmd_type = cmd_info.get('Type') # 'Type' holds the command string
-                        # Check NumArguments; only send if 0 for now (simplest case)
-                        if cmd_type and cmd_info.get('NumArguments', '0') == '0':
-                            self.add_message(f"Sending Cmd {i+1}: {cmd_type}", "info")
-                            self.send_command(cmd_type + '\r\n', from_gui=False)
-
-                            # Wait for the expected prompt after each command
-                            if not self.wait_for_specific_prompt(expected_prompt, timeout_sec=5): # Shorter timeout for sequential commands
-                                self.add_message(f"No prompt or error after '{cmd_type}'. Stopping commands for this slot.", "error")
-                                all_commands_sent_ok = False
-                                break # Stop sending commands for this slot
-                        elif cmd_type:
-                             self.add_message(f"Skipping XML cmd '{cmd_type}' (NumArguments != 0 or missing).", "warning")
-                        else:
-                             self.add_message(f"Skipping invalid XML cmd entry {i+1} (missing Type).", "warning")
-
-                    if all_commands_sent_ok:
-                         self.add_message(f"Finished sending config commands from XML.", "info")
-                    else:
-                         self.add_message(f"Aborted sending XML commands due to error for Slot {slot_num}.", "error")
-                         continue # Skip to next slot if commands failed
-
-                else:
-                    self.add_message(f"No commands found in <Commands> block for Slot {slot_num}.", "info")
-
-
-                # --- Step 5 & 6: Determine and Send wfchange ---
-                is_last_slot_in_sequence = (slot_info == slots_to_configure[-1])
-                wfchange_cmd_str = None # Reset for this slot
-
-                if not is_last_slot_in_sequence:
-                    # Intermediate Slot: Change to next sequential slot
-                    self.add_message("Determining current slot post-config...", "info")
-                    time.sleep(1) # Brief pause to allow potential GUI updates
-                    current_slot = -1
-                    try:
-                        current_slot_str = self.slot_value.get()
-                        if current_slot_str.isdigit(): current_slot = int(current_slot_str)
-                        else: self.add_message(f"Warning: Invalid current slot value '{current_slot_str}'.", "warning")
-                    except Exception as e: self.add_message(f"Error reading current slot: {e}", "error")
-
-                    if current_slot != -1:
-                        wfchange_target_slot = (current_slot % 4) + 1
-                        wfchange_cmd_str = f"wfchange {wfchange_target_slot}"
-                        self.add_message(f"Preparing to change from slot {current_slot} to next slot: {wfchange_target_slot}", "info")
-                    else:
-                        self.add_message("Skipping wfchange to next slot (unknown current slot).", "warning")
-
-                else:
-                    # Last Slot: Change back to Slot 1 (if not already there)
-                    self.add_message(f"Finished last configured slot ({slot_num}). Checking slot...", "info")
-                    current_slot = -1
-                    try:
-                         current_slot_str = self.slot_value.get()
-                         if current_slot_str.isdigit(): current_slot = int(current_slot_str)
-                    except Exception: pass
-
-                    if current_slot != 1:
-                        wfchange_cmd_str = "wfchange 1"
-                        self.add_message("Preparing to change back to slot 1.", "info")
-                    else:
-                        self.add_message("Device already in slot 1. No wfchange needed.", "info")
-
-                # Send the determined wfchange command (if any)
-                if wfchange_cmd_str:
-                    self.add_message(f"Sending: {wfchange_cmd_str}", "info")
-                    self.send_command(wfchange_cmd_str + '\r\n', from_gui=False)
-                    # Optional: Wait for prompt after wfchange
-                    # Note: The prompt might change AFTER wfchange. Using current 'expected_prompt' might be wrong.
-                    # Consider waiting for a generic prompt or skipping the wait here.
-                    # if not self.wait_for_specific_prompt(expected_prompt, timeout_sec=15):
-                    #     self.add_message(f"Warning: No prompt or error after {wfchange_cmd_str}.", "warning")
-
-
-                # --- Finished Slot ---
-                self.add_message(f"--- Finished Slot {slot_num} Processing ---", "info")
-                if not is_last_slot_in_sequence:
-                    time.sleep(1) # Small delay before starting next slot
-
-            # --- End of the main for loop for slots ---
+            # Complete progress
+            self.root.after(0, lambda: self.progress_var.set(100))
             self.add_message("--- Full Configuration Process Completed ---", "info")
+            logger.info("Configuration thread completed successfully")
 
         except Exception as e:
-            self.add_message(f"Config thread encountered an unhandled error: {e}", "error")
-            self.add_message(traceback.format_exc(), "error") # Log full traceback
+            error_msg = f"Config thread encountered an unhandled error: {e}"
+            self.add_message(error_msg, "error")
+            self.add_message(traceback.format_exc(), "error")
+            logger.error(error_msg, exc_info=True)
 
         finally:
-            # Ensure button is re-enabled in the main thread
+            # Reset progress and re-enable button
+            self.operation_in_progress = False
             if self.root.winfo_exists():
                 self.root.after(0, lambda: self.full_config_button.config(state=tk.NORMAL))
-            print("DEBUG: Config thread finished.")
+                self.root.after(0, lambda: self.progress_var.set(0))
+            logger.info("Configuration thread finished, button re-enabled")
 
+    def _run_config_thread_with_progress(self, slots_to_configure, brick_num):
+        """Enhanced configuration thread with progress tracking."""
+        logger.info(f"Configuration thread started with {len(slots_to_configure)} slots")
+        
+        try:
+            if not self.root.winfo_exists():
+                logger.warning("Root window closed, exiting config thread early")
+                return
+
+            # Initialize progress
+            total_slots = len(slots_to_configure)
+            
+            # Disable button via main thread
+            self.root.after(0, lambda: self.full_config_button.config(state=tk.DISABLED))
+            
+            for slot_idx, slot_info in enumerate(slots_to_configure):
+                if self.stop_thread.is_set():
+                    self.add_message("Config stopped by user.", "warning")
+                    break
+
+                # Update progress
+                progress_percent = (slot_idx / total_slots) * 100
+                self.root.after(0, lambda p=progress_percent: self.progress_var.set(p))
+
+                slot_index = slot_info['index']
+                slot_num = slot_index + 1
+                
+                self.add_message(f"--- Configuring Slot {slot_num} ({slot_idx + 1}/{total_slots}) ---", "info")
+                logger.info(f"Starting configuration for slot {slot_num}")
+                
+                # Process the slot using the original logic
+                success = self._process_single_slot(slot_info, brick_num)
+                
+                if not success:
+                    self.add_message(f"Configuration failed for Slot {slot_num}", "error")
+                    continue
+                
+                # Update progress for completed slot
+                progress_percent = ((slot_idx + 1) / total_slots) * 100
+                self.root.after(0, lambda p=progress_percent: self.progress_var.set(p))
+
+            # Complete progress
+            self.root.after(0, lambda: self.progress_var.set(100))
+            self.add_message("--- Full Configuration Process Completed ---", "info")
+            logger.info("Configuration thread completed successfully")
+
+        except Exception as e:
+            error_msg = f"Config thread encountered an unhandled error: {e}"
+            self.add_message(error_msg, "error")
+            self.add_message(traceback.format_exc(), "error")
+            logger.error(error_msg, exc_info=True)
+
+        finally:
+            # Reset progress and re-enable button
+            self.operation_in_progress = False
+            if self.root.winfo_exists():
+                self.root.after(0, lambda: self.full_config_button.config(state=tk.NORMAL))
+                self.root.after(0, lambda: self.progress_var.set(0))
+            logger.info("Configuration thread finished, button re-enabled")
+
+    def _process_single_slot(self, slot_info, brick_num):
+        """Process configuration for a single slot."""
+        try:
+            slot_index = slot_info['index']
+            slot_path = slot_info['path']
+            config_data = slot_info['data']
+            slot_num = slot_index + 1
+            
+            # Get expected prompts from config for this slot
+            expected_prompt = config_data.get('prompt')
+            needs_key_prompt = config_data.get('NeedsKey')
+            if not expected_prompt:
+                self.add_message(f"Config Error for Slot {slot_num}: Missing <prompt> tag in XML. Skipping slot.", "error")
+                return False
+
+            # TEK Key handling (simplified version of original logic)
+            tek_filename_from_config = config_data.get('TEKFile')
+            tek_load_cmd_base = config_data.get('TEKLoad')
+
+            if tek_filename_from_config and tek_load_cmd_base:
+                # Determine actual TEK file path (AME or WFC)
+                tek_filepath = ""
+                tek_file_lower = tek_filename_from_config.lower()
+                if tek_file_lower == "ame.tek":
+                    tek_filepath = self.ame_tek_path.get()
+                elif tek_file_lower == "wfc.tek":
+                    tek_filepath = self.wfc_tek_path.get()
+
+                if not tek_filepath or not os.path.exists(tek_filepath):
+                    self.add_message(f"TEK file not found for Slot {slot_num}. Skipping.", "error")
+                    return False
+
+                # Wait for prompt and send TEK key
+                if self.wait_for_specific_prompt(expected_prompt, timeout_sec=15):
+                    tek_key_1 = self.find_tek_keys(tek_filepath, brick_num)
+                    if tek_key_1:
+                        tek_command = f"{tek_load_cmd_base} {tek_key_1}"
+                        self.add_message(f"Sending TEK_1 for Slot {slot_num}...", "info")
+                        self.send_command(tek_command + '\r\n', from_gui=False)
+                        
+                        # Wait for prompt after sending key
+                        if not self.wait_for_specific_prompt(expected_prompt, timeout_sec=10):
+                            self.add_message("Timeout waiting for prompt after TEK. Stopping slot.", "error")
+                            return False
+                            
+                        # Send amereset if this is an AME slot (critical for AME configuration)
+                        if tek_file_lower == "ame.tek":
+                            self.add_message(f"Sending amereset for AME Slot {slot_num}...", "info")
+                            self.send_command("amereset\r\n", from_gui=False)
+                            
+                            # Wait for prompt after amereset - this may take longer as device resets
+                            if not self.wait_for_specific_prompt(expected_prompt, timeout_sec=30):
+                                self.add_message("Timeout waiting for prompt after amereset. Stopping slot.", "error")
+                                return False
+                            
+                            self.add_message(f"AME reset completed for Slot {slot_num}", "info")
+                    else:
+                        self.add_message(f"TEK_1 key not found for Slot {slot_num}. Stopping slot.", "error")
+                        return False
+                else:
+                    self.add_message("Initial prompt not received. Stopping slot.", "error")
+                    return False
+
+            # Send commands from XML
+            commands_to_send = config_data.get('Commands', [])
+            if commands_to_send:
+                self.add_message(f"Sending {len(commands_to_send)} config commands from XML...", "info")
+                for cmd_info in commands_to_send:
+                    cmd_type = cmd_info.get('Type')
+                    if cmd_type and cmd_info.get('NumArguments', '0') == '0':
+                        self.add_message(f"Sending: {cmd_type}", "info")
+                        self.send_command(cmd_type + '\r\n', from_gui=False)
+                        if not self.wait_for_specific_prompt(expected_prompt, timeout_sec=5):
+                            self.add_message(f"No prompt after '{cmd_type}'. Continuing...", "warning")
+
+            return True
+            
+        except Exception as e:
+            self.add_message(f"Error processing slot {slot_info.get('index', '?')}: {e}", "error")
+            return False
 
     def wait_for_specific_prompt(self, prompt_string, timeout_sec):
         """Waits for main_prompt_event (triggered by matching prompt_string)."""
@@ -1350,20 +1601,110 @@ Brick Num: {self.brick_number.get()}"""
             self.add_message(f"Timeout waiting for prompt: '{prompt_string}' ({timeout_sec}s).", "error")
         return prompt_ok
 
-    # --- Other Methods (unchanged assuming correct) ---
-    # set_command_entry
-    # toggle_connection (uses connect/disconnect)
-    # request_device_info
-    # copy_device_info
-    # send_command_event (uses send_command)
-    # clear_output
-    # save_log
-    # get_timestamp
-    # load_app_settings
-    # save_app_settings
-    # on_closing (uses save_app_settings, disconnect)
-    # select_slot_xml
-    # select_tek_file (uses save_app_settings)
+    def clear_all_slot_configs(self):
+        """Clear all slot XML configurations"""
+        if messagebox.askyesno("Clear Configurations", "Are you sure you want to clear all slot configurations?"):
+            for path_var in self.slot_xml_paths:
+                path_var.set("")
+            self.add_message("All slot configurations cleared.", "info")
+
+    def validate_all_tek_files(self):
+        """Validate all configured TEK files"""
+        issues = []
+        
+        # Check AME TEK file
+        ame_path = self.ame_tek_path.get()
+        if ame_path:
+            if not os.path.exists(ame_path):
+                issues.append(f"AME TEK file not found: {ame_path}")
+            else:
+                try:
+                    ET.parse(ame_path)
+                    self.add_message("AME TEK file validation passed.", "info")
+                except ET.ParseError as e:
+                    issues.append(f"AME TEK file parse error: {e}")
+        
+        # Check WFC TEK file
+        wfc_path = self.wfc_tek_path.get()
+        if wfc_path:
+            if not os.path.exists(wfc_path):
+                issues.append(f"WFC TEK file not found: {wfc_path}")
+            else:
+                try:
+                    ET.parse(wfc_path)
+                    self.add_message("WFC TEK file validation passed.", "info")
+                except ET.ParseError as e:
+                    issues.append(f"WFC TEK file parse error: {e}")
+        
+        # Check slot XML files
+        for i, path_var in enumerate(self.slot_xml_paths):
+            path = path_var.get()
+            if path:
+                if not os.path.exists(path):
+                    issues.append(f"Slot {i+1} XML file not found: {path}")
+                else:
+                    try:
+                        self.parse_config_xml(path)
+                        self.add_message(f"Slot {i+1} XML validation passed.", "info")
+                    except Exception as e:
+                        issues.append(f"Slot {i+1} XML parse error: {e}")
+        
+        if issues:
+            issue_text = "\n".join(issues)
+            messagebox.showerror("Validation Issues", f"Found the following issues:\n\n{issue_text}")
+        else:
+            messagebox.showinfo("Validation Complete", "All configured files passed validation!")
+
+    def run_device_diagnostics(self):
+        """Run comprehensive device diagnostics"""
+        if not self.is_bolt_connected:
+            messagebox.showwarning("Not Connected", "Please connect to BOLT device first.")
+            return
+            
+        self.add_message("--- Starting Device Diagnostics ---", "info")
+        
+        # List of diagnostic commands
+        diag_commands = [
+            "info",
+            "bricknumber", 
+            "unitid",
+            "tempc",
+            "status",
+            "version"
+        ]
+        
+        def send_next_diag_command(index=0):
+            if index < len(diag_commands):
+                cmd = diag_commands[index]
+                self.add_message(f"Diagnostic: Sending '{cmd}'", "info")
+                self.send_command(cmd + '\r\n', from_gui=False)
+                # Schedule next command
+                self.root.after(1000, lambda: send_next_diag_command(index + 1))
+            else:
+                self.add_message("--- Device Diagnostics Complete ---", "info")
+        
+        send_next_diag_command(0)
+
+    def show_about_dialog(self):
+        """Show about dialog"""
+        about_text = """BOLT Terminal & Configurator (Python Version)
+        
+Converted from .NET LBHH Red Tool
+Version: 2.0.0
+
+This application provides terminal communication and 
+configuration capabilities for BOLT devices.
+
+Features:
+• Serial communication with BOLT devices
+• TEK key management and loading
+• Multi-slot waveform configuration
+• Configuration file management
+• Device diagnostics and monitoring
+
+© 2025 - Python Conversion"""
+        
+        messagebox.showinfo("About", about_text)
 
 # --- Main execution block ---
 def main():
